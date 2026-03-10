@@ -1,0 +1,162 @@
+---
+title: "Data-Mining-Classification-Tree"
+format: html
+---
+```{python}
+import pandas as pd
+import numpy as np
+BASE = r"C:\Users\piavi\OneDrive\Documents\Oracle Project\Data to use"
+
+df = pd.read_csv(rf"{BASE}\Car_Crash_Fully_Preprocessed.csv")
+```
+
+Stage 1 — Train the Model & Compute Metrics
+```{python}
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import (classification_report, confusion_matrix,
+                              roc_curve, auc, accuracy_score, f1_score)
+from sklearn.utils import resample
+import pickle, warnings
+warnings.filterwarnings('ignore')
+
+# Balance classes via upsampling minority
+df_maj = df[df.Severity == 0]
+df_min = df[df.Severity == 1]
+df_min_up = resample(df_min, replace=True, n_samples=len(df_maj), random_state=42)
+df_bal = pd.concat([df_maj, df_min_up]).reset_index(drop=True)
+
+X_bal = df_bal.drop(columns=['Severity'])
+y_bal = df_bal['Severity']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X_bal, y_bal, test_size=0.2, random_state=42, stratify=y_bal)
+
+# Train decision tree (pruned to avoid overfitting)
+dt = DecisionTreeClassifier(
+    max_depth=6,
+    min_samples_split=50,
+    min_samples_leaf=25,
+    class_weight='balanced',
+    random_state=42
+)
+dt.fit(X_train, y_train)
+
+y_pred = dt.predict(X_test)
+y_prob = dt.predict_proba(X_test)[:, 1]
+
+acc = accuracy_score(y_test, y_pred)
+f1  = f1_score(y_test, y_pred)
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+roc_auc = auc(fpr, tpr)
+
+print(classification_report(y_test, y_pred, target_names=['Non-Severe (0)', 'Severe (1)']))
+print(f"Accuracy: {acc:.4f} | F1: {f1:.4f} | AUC-ROC: {roc_auc:.4f}")
+
+# 5-fold cross-validation on a 20k balanced sample
+samp_idx = np.random.RandomState(42).choice(len(X_bal), 20000, replace=False)
+cv_scores = cross_val_score(dt, X_bal.iloc[samp_idx], y_bal.iloc[samp_idx], cv=5, scoring='f1')
+print(f"5-Fold CV F1: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+
+# Top 15 feature importances
+feat_imp = pd.Series(dt.feature_importances_, index=X_bal.columns)
+top15 = feat_imp.nlargest(15)
+print(top15)
+```
+
+Stage 2 — Generate the Visual Report
+```{python}
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import FancyBboxPatch
+import pickle
+from sklearn.tree import plot_tree
+
+# ── Colour palette ──────────────────────────────────────────────────────────
+C1, C2, C3 = '#1a3a5c', '#e84545', '#2ecc71'
+BG = '#f7f9fc'
+
+fig = plt.figure(figsize=(22, 26), facecolor=BG)
+fig.suptitle('Car Crash Severity — Decision Tree Classification Report',
+             fontsize=22, fontweight='bold', color=C1, y=0.98)
+
+gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.45, wspace=0.35,
+                       top=0.94, bottom=0.04, left=0.07, right=0.97)
+
+# ── Metric cards (top strip) ────────────────────────────────────────────────
+ax_cards = fig.add_subplot(gs[0, :])
+ax_cards.set_xlim(0, 1); ax_cards.set_ylim(0, 1); ax_cards.axis('off')
+card_data = [
+    ('Accuracy',   f'{acc*100:.1f}%',  '#1a3a5c'),
+    ('F1-Score',   f'{f1:.3f}',        '#2471a3'),
+    ('AUC-ROC',    f'{roc_auc:.3f}',   '#2ecc71'),
+    ('CV F1 Mean', f'{cv_scores.mean():.3f}',      '#e67e22'),
+    ('CV F1 Std',  f'±{cv_scores.std():.4f}',      '#8e44ad'),
+]
+for i, (label, val, col) in enumerate(card_data):
+    x = 0.05 + i * 0.19
+    rect = FancyBboxPatch((x, 0.15), 0.16, 0.7,
+                           boxstyle='round,pad=0.015', linewidth=2,
+                           edgecolor=col, facecolor='white')
+    ax_cards.add_patch(rect)
+    ax_cards.text(x+0.08, 0.72, label, ha='center', va='center',
+                  fontsize=11, color='#555', fontweight='bold')
+    ax_cards.text(x+0.08, 0.38, val, ha='center', va='center',
+                  fontsize=20, color=col, fontweight='bold')
+
+# ── Confusion Matrix ────────────────────────────────────────────────────────
+ax_cm = fig.add_subplot(gs[1, 0])
+cm = confusion_matrix(y_test, y_pred)
+im = ax_cm.imshow(cm, cmap='Blues')
+ax_cm.set_xticks([0,1]); ax_cm.set_yticks([0,1])
+ax_cm.set_xticklabels(['Non-Severe','Severe'], fontsize=11)
+ax_cm.set_yticklabels(['Non-Severe','Severe'], fontsize=11)
+ax_cm.set_xlabel('Predicted Label', fontsize=12, labelpad=8)
+ax_cm.set_ylabel('True Label', fontsize=12, labelpad=8)
+ax_cm.set_title('Confusion Matrix', fontsize=14, fontweight='bold', color=C1, pad=12)
+for i in range(2):
+    for j in range(2):
+        ax_cm.text(j, i, f'{cm[i,j]:,}', ha='center', va='center',
+                   fontsize=16, color='white' if cm[i,j] > cm.max()/2 else '#333',
+                   fontweight='bold')
+fig.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
+
+# ── ROC Curve ───────────────────────────────────────────────────────────────
+ax_roc = fig.add_subplot(gs[1, 1])
+ax_roc.plot(fpr, tpr, color=C1, lw=2.5, label=f'ROC curve (AUC = {roc_auc:.3f})')
+ax_roc.plot([0,1],[0,1], color='grey', lw=1.5, linestyle='--', label='Random Classifier')
+ax_roc.fill_between(fpr, tpr, alpha=0.12, color=C1)
+ax_roc.set_xlim([0,1]); ax_roc.set_ylim([0,1.02])
+ax_roc.set_xlabel('False Positive Rate', fontsize=12)
+ax_roc.set_ylabel('True Positive Rate', fontsize=12)
+ax_roc.set_title('ROC Curve', fontsize=14, fontweight='bold', color=C1, pad=12)
+ax_roc.legend(fontsize=11, loc='lower right')
+ax_roc.set_facecolor(BG); ax_roc.grid(alpha=0.3)
+
+# ── Feature Importances ─────────────────────────────────────────────────────
+ax_fi = fig.add_subplot(gs[2, 0])
+colors = [C1 if v == top15.values.max() else '#2471a3' if v >= np.percentile(top15.values, 75)
+          else '#5dade2' for v in top15.values[::-1]]
+bars = ax_fi.barh(top15.index[::-1], top15.values[::-1],
+                   color=colors, edgecolor='white', height=0.7)
+for bar, val in zip(bars, top15.values[::-1]):
+    ax_fi.text(bar.get_width() + 0.003, bar.get_y() + bar.get_height()/2,
+               f'{val:.3f}', va='center', fontsize=9, color='#333')
+ax_fi.set_xlabel('Feature Importance (Gini)', fontsize=12)
+ax_fi.set_title('Top 15 Feature Importances', fontsize=14, fontweight='bold', color=C1, pad=12)
+ax_fi.set_facecolor(BG); ax_fi.grid(axis='x', alpha=0.3)
+ax_fi.set_xlim(0, top15.values.max() * 1.15)
+
+# ── Decision Tree Structure (depth 3 preview) ───────────────────────────────
+ax_tree = fig.add_subplot(gs[2, 1])
+plot_tree(dt, max_depth=3, feature_names=list(X_bal.columns),
+          class_names=['Non-Severe', 'Severe'],
+          filled=True, rounded=True, fontsize=7,
+          impurity=False, proportion=True,
+          ax=ax_tree)
+ax_tree.set_title('Decision Tree Structure (depth 3 preview)',
+                   fontsize=14, fontweight='bold', color=C1, pad=12)
+
+plt.savefig('decision_tree_report.png', dpi=150, bbox_inches='tight', facecolor=BG)
+plt.show()
+```
